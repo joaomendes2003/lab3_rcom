@@ -12,6 +12,31 @@
 #define FALSE 0
 #define TRUE 1
 
+#define START 0 
+#define FLAG_RCV 1 
+#define A_RCV 2 
+#define C_RCV 3
+#define BCC_OK 4
+#define STATE_STOP 5
+
+
+#define FLAG 0x5c
+#define A 0x03
+#define C_SET 0x07
+#define C_UA 0x06
+#define C_RR 0x11
+#define C_I 0xC0
+#define D 0x00
+#define BCC1_SET A^C_SET
+#define BCC1_UA A^C_UA
+#define BCC1_RR A^C_RR
+#define BCC1_I A^C_I
+#define BCC2_I A^D
+
+
+
+
+
 volatile int STOP=FALSE;
 
 int main(int argc, char** argv)
@@ -72,21 +97,117 @@ int main(int argc, char** argv)
     printf("New termios structure set\n");
 
 
-    //unsigned char FLAG = "o";
-    //printf("%u", FLAG);
-    unsigned char FLAG = 0x5c;
-    unsigned char A = 0x03;
-    unsigned char C = 0x08;
-    unsigned char BCC1 = A^C;
-
     buf[0]=FLAG;
     buf[1]=A;
-    buf[2]=C;
-    buf[3]=BCC1;
+    buf[2]=C_SET;
+    buf[3]=BCC1_SET;
     buf[4]=FLAG;   
    
     res = write(fd,buf,5);
-    printf("%d bytes written\n", res);
+    printf("%d bytes written - SET message sent\n", res);
+
+
+    unsigned char aux;
+    int state = START;
+
+    /* Receive UA */
+    while (state!=STATE_STOP) {   
+        
+        res = read(fd,&aux,1);   /* returns after 1 chars have been input */
+            
+        switch (state)
+        {
+        case START:
+            if( aux == FLAG) state=FLAG_RCV;
+            break;
+
+        case FLAG_RCV:          
+            if( aux == FLAG) state=FLAG_RCV;
+            else if( aux == A) state=A_RCV;
+            else state=START;
+            break;
+
+        case A_RCV:           
+            if( aux == FLAG) state=FLAG_RCV;
+            else if( aux == C_UA) state=C_RCV;
+            else state=START;
+            break;
+
+        case C_RCV:
+            if( aux == FLAG) state=FLAG_RCV;
+            else if( aux == BCC1_UA) state=BCC_OK;
+            else state=START;
+            break;
+
+        case BCC_OK:       
+            if( aux == FLAG) state=STATE_STOP;
+            else state=START;
+            break;
+
+        default:
+            break;
+        }        
+    }
+
+    printf("UA message recieved\n");
+
+
+    /* Send I */
+    
+    buf[0]=FLAG;
+    buf[1]=A;
+    buf[2]=C_I;
+    buf[3]=BCC1_I;
+    buf[4]=D; 
+    buf[5]= BCC2_I;
+    buf[6]= FLAG;
+   
+    res = write(fd,buf,5);
+    printf("%d bytes written - I message sent\n", res);
+
+   
+    /* Receive RR */
+    state = START;
+
+    while (state!=STATE_STOP) {     
+        
+        res = read(fd,&aux,1);   /* returns after 1 chars have been input */
+            
+        switch (state)
+        {
+        case START:
+            if( aux == FLAG) state=FLAG_RCV;
+            break;
+
+        case FLAG_RCV:          
+            if( aux == FLAG) state=FLAG_RCV;
+            else if( aux == A) state=A_RCV;
+            else state=START;
+            break;
+
+        case A_RCV:           
+            if( aux == FLAG) state=FLAG_RCV;
+            else if( aux == C_RR) state=C_RCV;
+            else state=START;
+            break;
+
+        case C_RCV:
+            if( aux == FLAG) state=FLAG_RCV;
+            else if( aux == BCC1_RR) state=BCC_OK;
+            else state=START;
+            break;
+
+        case BCC_OK:       
+            if( aux == FLAG) state=STATE_STOP;
+            else state=START;
+            break;
+
+        default:
+            break;
+        }        
+    }
+
+    printf("RR message recieved\n");
    
 
 
