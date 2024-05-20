@@ -246,6 +246,3 @@ int llclose(linkLayer machine, int statistics_print){
 
 
 
-/*How does REJ work? Should the program look for the previous packet sent and compare the two and, if equal, send REJ?*/
-/*Missing retransmissions at I frames*/
-/*Timer should not start at reception of response*/
