@@ -1,3 +1,5 @@
+#ifndef LINKLAYER
+#define LINKLAYER
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -25,12 +27,11 @@ typedef struct linkLayer{
 #define FALSE 0
 #define TRUE 1
 
-//BYTES
+
 #define FLAG 0x5C
 #define A_TRANS 0x01
 #define A_REC 0x03
 
-//Control bytes
 #define C_SET 0x07
 #define C_UA 0x06
 #define C_DISC 0x0A
@@ -41,13 +42,22 @@ typedef struct linkLayer{
 #define C_REJ0 0x05
 #define C_REJ1 0x15
 
+//Byte stuffing
+#define ESC 0x5D
+#define XOR_BYTE 0x20
+
 int fd;
+_Bool nr = 1, ns = 0;
 
 struct linkLayer global_parameters; //for connection parameters
 
 struct termios oldtio, newtio;
 
 time_t start, end;
+
+//states
+
+//typedef enum {START, FLAG_RCV, A_RCV, C_RCV, BCC1_OK, D_N_RCV, ESC_MAYBE, BCC2_OK, STOP} STATE;
 
 #define START 0 
 #define FLAG_RCV 1 
@@ -56,7 +66,8 @@ time_t start, end;
 #define BCC1_OK 4
 #define STOP 5
 #define BCC2_OK 6
-#define D_RCV 7
+#define D_N_RCV 7
+#define ESC_MAYBE 8 
 
 //use the given code to set the serial port defaults
 void serial_port(struct termios *oldtio, struct termios *newtio, int fd) 
@@ -85,69 +96,69 @@ void serial_port(struct termios *oldtio, struct termios *newtio, int fd)
 }
 
 int state_machine(_Bool timer, unsigned char control, char address){
-    
     int state = START;
-    unsigned char aux;
-    bool flag_rej = 0;
+    unsigned char aux[1];
+
+    _Bool rej_flag = 0;
 
     while(state != STOP){
         
         if(timer) //1 passed by call
         {
             end = clock();
-            if((end - start) >= (global_parameters.timeOut * 1000)) return -2; //return in timeout
+            if((end - start) >= (global_parameters.timeOut * 1000)) return -2;
         }
         read(fd, aux, 1);
         switch(state){
             case START:
-                if( aux == FLAG) state=FLAG_RCV;
+                if( aux[0] == FLAG) state=FLAG_RCV;
                 break;
 
             case FLAG_RCV:
-                if(aux == address) //A received correctly
+                if(aux[0] == address) //A received correctly
                     state = A_RCV;
             
-                else if (aux == FLAG) state=FLAG_RCV;
+                else if (aux[0] == FLAG) state=FLAG_RCV;
                 else state=START;
 
                 break;
                 
             case A_RCV:
-                if(aux == control) state = C_RCV;
+                if(aux[0] == control) state = C_RCV;
     
-                else if(aux==FLAG) state = FLAG_RCV;
+                else if(aux[0]==FLAG) state = FLAG_RCV;
                 else
                 {
-                    if(((control == C_RR0) || (control == C_RR1)) && ((aux == C_REJ0) || (aux == C_REJ1))) 
+                    if(((control == C_RR0) || (control == C_RR1)) && ((aux[0] == C_REJ0) || (aux[0] == C_REJ1))) 
                     {
-                        flag_rej=!flag_rej;
-                        control = aux;
+                        !rej_flag;
+                        control = aux[0];
                     }
                     state = START;
                 }
-                
                 break;
 
             case C_RCV:
-                if(aux == (address ^ control)) state = BCC1_OK; //A^C
+                if(aux[0] == (address ^ control)) state = BCC1_OK; //A^C
                 
-                else if(aux==FLAG) state = FLAG_RCV;
+                else if(aux[0]==FLAG) state = FLAG_RCV;
                 else state = START;
                 
                 break;
 
             case BCC1_OK:
-                if( aux == FLAG) state=STOP;
+                if( aux[0] == FLAG) state=STOP;
                 else state=START;
                 break;
         }
     }
-    if(flag_rej) return 1;
+    if(rej_flag) return 1;
+    //printf("\n");
 }
 
-//Opens a connection using the "port" parameters defined in struct linkLayer, returns "-1" on error and "1" on sucess
-int llopen(linkLayer machine){ //machine -> connection parameters
-    global_parameters = machine;
+// Opens a connection using the parameters defined in struct linkLayer, returns "-1" on error and "1" on sucess
+int llopen(linkLayer connectionParameters){ //connectionParameters -> connection parameters
+    global_parameters = connectionParameters;
 
     //Open connection
     fd = open(global_parameters.serialPort, O_RDWR | O_NOCTTY ); 
@@ -158,19 +169,22 @@ int llopen(linkLayer machine){ //machine -> connection parameters
     unsigned char buf_SET[5] = {FLAG, A_TRANS, C_SET, (A_TRANS ^ C_SET), FLAG};
     unsigned char buf_UA[5] = {FLAG, A_TRANS, C_UA, (A_TRANS ^ C_UA), FLAG};
 
-    switch(machine.role){
+    switch(connectionParameters.role){
         case 0: //Transmitter
             //sends SET message
             start = clock();
             write(fd, buf_SET, 5);
-            //printf("")
+            //printf("before while\n");
 
             int n_transmissions = 0;
             //receives UA message
-            
+            //printf("UA\t");
+
             //Retransmission in case of timeout
             while(state_machine(1, C_UA, A_TRANS) == -2){
-                if(n_transmissions == machine.numTries) return -1;
+                printf("in while\n");
+                //printf("\nUA (%d)\t", n_transmissions);
+                if(n_transmissions == connectionParameters.numTries) return -1;
                 start = clock();
                 write(fd, buf_SET, 5);
                 n_transmissions++;
@@ -178,8 +192,8 @@ int llopen(linkLayer machine){ //machine -> connection parameters
             return 1;
 
         case 1: //Receiver
-
             //receives SET message
+            //printf("SET\t");
             state_machine(0, C_SET, A_TRANS); //0 to not enter timer if
 
             //sends UA message
@@ -191,23 +205,173 @@ int llopen(linkLayer machine){ //machine -> connection parameters
     }
 }
 
-// Closes previously opened connection; if statistics_print==TRUE, link layer should print statistics in the console on close
-int llclose(linkLayer machine, int statistics_print){
+// Sends data in buf with size bufSize
+int llwrite(unsigned char* buf, int bufSize){
+
+    int packetSize = bufSize + 6;
+    unsigned char *packet = (unsigned char*)malloc(packetSize * sizeof(unsigned char)); //creates space for all 6 control bytes and for all data bytes
+    int packet_index = 4;
+    unsigned char bcc2;
+
+
+    unsigned char c;
+    switch(ns){
+        case 0:
+            c = C_I0;
+            break;
+        case 1:
+            c = C_I1;
+    }
+
+    packet[0] = FLAG;
+    packet[1] = A_TRANS;
+    packet[2] = c;
+    packet[3] = A_TRANS ^ c;
+
+    
+    for(int i = 0; i < bufSize; i++){
+       
+        switch(i){
+            case 0:
+                bcc2 = buf[0];
+                break;
+            default:
+                bcc2 = bcc2 ^ buf[i];
+        }
+        switch(buf[i]){
+            case FLAG:
+                packetSize++;
+                packet = (unsigned char*)realloc(packet, packetSize * sizeof(unsigned char));
+                packet[packet_index++] = ESC;
+                packet[packet_index++] = FLAG ^ XOR_BYTE;
+                break;
+            case ESC:
+                packetSize++;
+                packet = (unsigned char*)realloc(packet, packetSize * sizeof(unsigned char));
+                packet[packet_index++] = ESC;
+                packet[packet_index++] = ESC ^ XOR_BYTE;
+                break;
+            default:
+                packet[packet_index++] = buf[i];
+        }
+    }
+
+    //parses last 2 bytes
+    packet[packetSize - 2] = bcc2;
+    packet[packetSize - 1] = FLAG;
+
+    write(fd, packet, packetSize);
+
+    c = C_RR0;
+    if(nr) c = C_RR1;
+
+    int n_transmissions = 0;
+
+    //receives RR(nr) message
+    state_machine(1, c, A_TRANS);
+
+    free(packet);
+    nr = !nr;
+    ns = !ns;
+    //returns number of written characters
+    return packetSize;
+}
+
+// Receive data in packet
+int llread(unsigned char* packet){
+    int state = START;
+    int packetSize = 0;
+    unsigned char* packetBuf = (unsigned char*)malloc(sizeof(unsigned char));
+    unsigned char bcc2;
+    int packet_index = 0;
+    unsigned char aux[1];
+    unsigned char carry;
+
+    while(state != STOP){
+        read(fd, aux, 1);
+        
+        switch(state){
+            case START:
+                if (aux[0]==FLAG) state=FLAG_RCV;
+                else state=START;
+                break;
+
+            case FLAG_RCV:
+                if( aux[0] == FLAG) state=FLAG_RCV;
+                else if( aux[0] == A_TRANS) state=A_RCV;
+                else state=START;
+                break;               
+                
+            case A_RCV:
+                if( aux[0] == FLAG) state=FLAG_RCV;
+                else if( aux[0] == C_I0 || aux[0] == C_I1) state=C_RCV;
+                else state=START;
+                break;
+
+            case C_RCV:
+                if( aux[0] == FLAG) state=FLAG_RCV;
+                else if( aux[0] == A_TRANS^C_I0 || aux[0] == A_TRANS^C_I1) 
+                    state=BCC1_OK;
+                else state=START;
+                break;
+                
+            case BCC1_OK:
+                if(aux[0]==FLAG) state=STOP;
+                else if(aux[0] == ESC) state=ESC_MAYBE;
+                else
+                {
+                    bcc2 = aux[0];
+                    packetSize++;
+                    packetBuf = (unsigned char*)realloc(packetBuf, packetSize * sizeof(unsigned char));
+                    packetBuf[packet_index++] = aux[0];
+                    state = D_N_RCV;
+                }
+                break;
+
+            case D_N_RCV:
+                if(aux[0] == bcc2)
+                {
+                    state = BCC2_OK;
+                if(aux[0] == bcc2)
+                    carry = aux[0];
+                }
+                if(aux[0]==FLAG) state=STOP;
+                else if(aux[0]==ESC) state=ESC_MAYBE;
+                else
+                {
+                    bcc2 = bcc2 ^ aux[0];
+                    packetSize++;
+                    packetBuf = (unsigned char*)realloc(packetBuf, packetSize * sizeof(unsigned char));
+                    packetBuf[packet_index++] = aux[0];
+                }
+                break;
+        }
+    }
+
+    unsigned char buf_RR[5] = {FLAG, A_TRANS, c, (A_TRANS ^ c), FLAG};
+    write(fd, buf_RR, 5);
+
+    nr = !nr;
+    ns = !ns;
+    return packetSize;
+}
+
+// Closes previously opened connection; if showStatistics==TRUE, link layer should print statistics in the console on close
+int llclose(linkLayer connectionParameters, int showStatistics){
     
     int n_transmissions = 0;
 
-    switch(machine.role){
-        case 0: //Transmitter
+    unsigned char buf_DISC_T[5] = {FLAG, A_TRANS, C_DISC, (A_TRANS ^ C_DISC), FLAG};
 
-            unsigned char buf_DISC_T[5] = {FLAG, A_TRANS, C_DISC, (A_TRANS ^ C_DISC), FLAG};
+    switch(connectionParameters.role){
+        case 0: //Transmitter
             //sends DISC message
             write(fd, buf_DISC_T, 5);
 
             //receives DISC message
-            
             while(state_machine(1, C_DISC, A_REC) == -2){
-                
-                if(n_transmissions == machine.numTries) return -1;
+                //printf("\n number of DISC messages: (%d)\t", n_transmissions);
+                if(n_transmissions == connectionParameters.numTries) return -1;
                 write(fd, buf_DISC_T, 5);
                 n_transmissions++;
             }
@@ -227,8 +391,7 @@ int llclose(linkLayer machine, int statistics_print){
             //printf("UA\t");
             //receives UA message
             while(state_machine(1, C_UA, A_REC) == -2){
-                //printf("\nDISC (%d)\t", n_transmissions);
-                if(n_transmissions == machine.numTries) return -1;
+                if(n_transmissions == connectionParameters.numTries) return -1;
                 write(fd, buf_DISC_R, 5);
                 n_transmissions++;
             }
@@ -237,12 +400,10 @@ int llclose(linkLayer machine, int statistics_print){
             return -1;
     }
     
-    sleep(1);
     tcsetattr(fd,TCSANOW,&oldtio);
     close(fd);
 
     return 1;
 }
 
-
-
+#endif
